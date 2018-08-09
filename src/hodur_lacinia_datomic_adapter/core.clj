@@ -248,6 +248,7 @@
      :field-name camelCaseName
      :arg-name (:param/camelCaseName pull-param)
      :arg-type arg-type
+     :transform (:lacinia->datomic/transform pull-param)
      :ident (if (= :lookup arg-type)
               (:lacinia->datomic/lookup pull-param)
               :none)}))
@@ -277,7 +278,7 @@
     (->> (concat pull-fields find-fields)
          (reduce
           (fn [m {:keys [resolve-type field-name
-                         arg-name arg-type ident] :as field-entry}]
+                         arg-name arg-type ident transform] :as field-entry}]
             (cond-> m
               (= :pull resolve-type)
               (assoc-in [:queries field-name :resolve]
@@ -286,22 +287,16 @@
                                                      extract-lacinia-selections
                                                      (find-selection-by-field field-name))
                                 selector (build-datomic-selector field-selection engine-conn)
-                                arg-val (get args arg-name)
+                                arg-val (if transform
+                                          ((find-var transform) (get args arg-name))
+                                          (get args arg-name))
                                 eid (cond
                                       (= :eid arg-type) arg-val
                                       (= :lookup arg-type) [ident arg-val])
                                 db (datomic/db db-conn)]
-                            ;;FIXME this is where it should connect to db-conn
-                            #_(clojure.pprint/pprint
-                               {:selector selector
-                                :eid eid})
-                            #_(clojure.pprint/pprint
-                               (datomic/pull db selector eid))
                             (-> db
                                 (datomic/pull selector eid)
-                                (build-lacinia-response engine-conn))
-                            
-                            )))
+                                (build-lacinia-response engine-conn)))))
 
               (= :find resolve-type)
               (assoc-in [:queries field-name :resolve]
@@ -318,6 +313,11 @@
                                                (= :lookup arg-type) [ident arg-val])})))))
             )
           lacinia-schema))))
+
+(defn transform-email
+  [v]
+  (println v)
+  v)
 
 (def s
   '[^{:datomic/tag-recursive {:except [full-name reportees]}
@@ -367,7 +367,8 @@
        :lacinia->datomic/type :pull}
      employeeByEmail
      [^{:type String
-        :lacinia->datomic/lookup :employee/email}
+        :lacinia->datomic/lookup :employee/email
+        :lacinia->datomic/transform hodur-lacinia-datomic-adapter.core/transform-email}
       email]
 
      ^{:type Employee
@@ -486,17 +487,17 @@
                    "{ employeeByEmail (email: \"foo\") { fullName firstName projects { name } supervisor { fullName } } }"
                    nil nil)
 
-(lacinia/execute
- compiled-schema
- "{ employeeByEmail (email: \"tl@work.co\") { fullName supervisor { firstName } reportees { lastName } } }"
- nil nil)
+#_(lacinia/execute
+   compiled-schema
+   "{ employeeByEmail (email: \"zeh@work.co\") { fullName supervisor { firstName } reportees { lastName } } }"
+   nil nil)
 
 #_(lacinia/execute
    compiled-schema
    "{ employeesWithOffsetAndLimit { fullName supervisor { firstName } reportees { lastName } } }"
    nil nil)
 
-#_(lacinia/execute
-   compiled-schema
-   "{ employeeByEmail (email: \"zeh@work.co\") { fullName firstName supervisor { fullName } } }"
-   nil nil)
+(lacinia/execute
+ compiled-schema
+ "{ employeeByEmail (email: \"zeh@work.co\") { fullName firstName supervisor { fullName } } }"
+ nil nil)
