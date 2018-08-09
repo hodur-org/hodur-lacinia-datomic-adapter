@@ -5,6 +5,7 @@
                                             ->SCREAMING_SNAKE_CASE_KEYWORD
                                             ->kebab-case-keyword
                                             ->kebab-case-string]]
+            [datomic.client.api :as datomic]
             [datascript.core :as d]
             [datascript.query-v3 :as q]
             ;;FIXME: these below are probably not needed
@@ -32,9 +33,10 @@
 (defn ^:private extract-lacinia-type-name
   [{:keys [field-definition] :as selection}]
   (let [kind (-> field-definition :type :kind)]
-    (if (= :list kind)
-      (-> field-definition :type :type :type :type)
-      (-> field-definition :type :type :type))))
+    (case kind
+      :list (-> field-definition :type :type :type :type)
+      :non-null (-> field-definition :type :type :type)
+      :root (-> field-definition :type :type))))
 
 (defn ^:private find-selection-by-field
   [field-name selections]
@@ -117,35 +119,124 @@
     (->> eids
          (d/pull-many @engine-conn selector))))
 
+(defn ^:private query-datomic-fields
+  [engine-conn]
+  (let [selector '[* {:field/parent [*]
+                      :field/type [*]}]
+        query '[:find ?f
+                :where
+                [?f :datomic/tag true]
+                [?f :field/name]]
+        eids (-> (q/q query @engine-conn)
+                 vec flatten)]
+    (->> eids
+         (d/pull-many @engine-conn selector))))
+
+{:employee/first-name :firstName
+ :employee/projects :projects
+ :employee/_supervisor :reportees}
+
+{:fullName [:employee/first-name :employee/last-name]
+ :firstName [:employee/first-name]
+ :reportees [:employee/_supervisor]}
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defn ^:private lacinia->datomic-map
+  [type-name fields]
+  (reduce (fn [m {:keys [field/camelCaseName
+                         field/kebab-case-name
+                         lacinia->datomic/reverse-lookup
+                         lacinia->datomic/depends-on] :as field}]
+            (let [datomic-field-name
+                  (if depends-on
+                    depends-on
+                    (if reverse-lookup
+                      [reverse-lookup]
+                      [(keyword
+                        (->kebab-case-string type-name)
+                        (name kebab-case-name))]))]
+              (assoc m camelCaseName datomic-field-name)))
+          {} fields))
+
+(defn ^:private datomic->lacinia-map
+  [fields]
+  (reduce (fn [m {:keys [field/camelCaseName
+                         field/kebab-case-name
+                         lacinia->datomic/reverse-lookup] :as field}]
+            (let [datomic-field-name
+                  (if reverse-lookup
+                    reverse-lookup
+                    (keyword
+                     (name (-> field :field/parent :type/kebab-case-name))
+                     (name kebab-case-name)))]
+              (assoc m datomic-field-name camelCaseName)))
+          {} fields))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+#_(defn ^:private build-datomic-selector
+    [field-selection engine-conn]
+    (let [inner-selections (:selections field-selection)
+          type-name (extract-lacinia-type-name field-selection)
+          fields (query-datomic-fields-on-lacinia-type type-name engine-conn)]
+      (vec
+       (reduce
+        (fn [c selection]
+          (if-let [field (find-field-on-lacinia-field-name
+                          (:field selection) fields)]
+            (let [field-name (:field/name field)
+                  reverse-loopkup (:lacinia->datomic/reverse-lookup field)
+                  datomic-field-name (if reverse-loopkup
+                                       reverse-loopkup
+                                       (keyword
+                                        (->kebab-case-string type-name)
+                                        (->kebab-case-string field-name)))
+                  selection-selections (:selections selection)
+                  depends-on (:lacinia->datomic/depends-on field)]
+              (if depends-on
+                (apply conj c depends-on)
+                (if selection-selections
+                  (conj c (assoc {} datomic-field-name
+                                 (build-datomic-selector selection engine-conn)))
+                  (conj c datomic-field-name))))
+            c))
+        #{} inner-selections))))
 
 (defn ^:private build-datomic-selector
   [field-selection engine-conn]
   (let [inner-selections (:selections field-selection)
         type-name (extract-lacinia-type-name field-selection)
-        fields (query-datomic-fields-on-lacinia-type type-name engine-conn)]
+        fields (query-datomic-fields-on-lacinia-type type-name engine-conn)
+        lacinia->datomic (lacinia->datomic-map type-name fields)]
     (vec
      (reduce
       (fn [c selection]
-        (if-let [field (find-field-on-lacinia-field-name
-                        (:field selection) fields)]
-          (let [field-name (:field/name field)
-                reverse-loopkup (:lacinia->datomic/reverse-lookup field)
-                datomic-field-name (if reverse-loopkup
-                                     reverse-loopkup
-                                     (keyword
-                                      (->kebab-case-string type-name)
-                                      (->kebab-case-string field-name)))
-                selection-selections (:selections selection)
-                depends-on (:lacinia->datomic/depends-on field)]
-            (if depends-on
-              (apply conj c depends-on)
-              (if selection-selections
-                (conj c (assoc {} datomic-field-name
-                               (build-datomic-selector selection engine-conn)))
-                (conj c datomic-field-name))))
-          c))
+        (let [lacinia-field-name (:field selection)
+              datomic-fields (get lacinia->datomic lacinia-field-name)
+              selection-selections (:selections selection)]
+          (if datomic-fields
+            (if selection-selections
+              (conj c (assoc {} (first datomic-fields)
+                             (build-datomic-selector selection engine-conn)))
+              (apply conj c datomic-fields)))))
       #{} inner-selections))))
+
+(defn ^:private reduce-lacinia-response
+  [datomic-obj datomic->lacinia]
+  (reduce-kv (fn [m k v]
+               (let [lacinia-field-name (get datomic->lacinia k)]
+                 (if (map? v)
+                   (assoc m lacinia-field-name
+                          (reduce-lacinia-response v datomic->lacinia))
+                   (assoc m lacinia-field-name v))))
+             {} datomic-obj))
+
+(defn ^:private build-lacinia-response
+  [datomic-obj engine-conn]
+  (let [fields (query-datomic-fields engine-conn)
+        datomic->lacinia (datomic->lacinia-map fields)]
+    (reduce-lacinia-response datomic-obj datomic->lacinia)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -191,17 +282,26 @@
               (= :pull resolve-type)
               (assoc-in [:queries field-name :resolve]
                         (fn [ctx args resolved-value]
-                          (let [field-selections (->> ctx
-                                                      extract-lacinia-selections
-                                                      (find-selection-by-field field-name))
-                                selector (build-datomic-selector field-selections engine-conn)
-                                arg-val (get args arg-name)]
+                          (let [field-selection (->> ctx
+                                                     extract-lacinia-selections
+                                                     (find-selection-by-field field-name))
+                                selector (build-datomic-selector field-selection engine-conn)
+                                arg-val (get args arg-name)
+                                eid (cond
+                                      (= :eid arg-type) arg-val
+                                      (= :lookup arg-type) [ident arg-val])
+                                db (datomic/db db-conn)]
                             ;;FIXME this is where it should connect to db-conn
-                            (clojure.pprint/pprint
-                             {:selector selector
-                              :eid (cond
-                                     (= :eid arg-type) arg-val
-                                     (= :lookup arg-type) [ident arg-val])}))))
+                            #_(clojure.pprint/pprint
+                               {:selector selector
+                                :eid eid})
+                            #_(clojure.pprint/pprint
+                               (datomic/pull db selector eid))
+                            (-> db
+                                (datomic/pull selector eid)
+                                (build-lacinia-response engine-conn))
+                            
+                            )))
 
               (= :find resolve-type)
               (assoc-in [:queries field-name :resolve]
@@ -233,10 +333,11 @@
      full-name
 
      ^{:type String
-       :datomic/unique true}
+       :datomic/unique :db.unique/identity}
      email
      
-     ^Employee
+     ^{:type Employee
+       :optional true}
      supervisor
 
      ^{:type Employee
@@ -281,9 +382,13 @@
        :lacinia->datomic/type :find}
      employeesWithOffsetAndLimit
      [^{:type Integer
+        :optional true
+        :default 0 
         :lacinia->datomic/offset true}
       offset
       ^{:type Integer
+        :optional true
+        :default 50
         :lacinia->datomic/limit true}
       limit]
 
@@ -328,12 +433,44 @@
 
 #_(attach-resolvers lacinia-schema conn nil)
 
+(def cfg {:server-type :ion
+          :region "us-east-2"
+          :system "datomic-cloud-luchini"
+          :query-group "datomic-cloud-luchini"
+          :endpoint "http://entry.datomic-cloud-luchini.us-east-2.datomic.net:8182/"
+          :proxy-port 8182})
+
+(def client (datomic/client cfg))
+
+(defn ^:private ensure-db [client db-name]
+  (-> client
+      (datomic/create-database {:db-name db-name}))
+  (let [db-conn (datomic/connect client {:db-name db-name})]
+    (datomic/transact db-conn {:tx-data datomic-schema})
+    db-conn))
+
+(def db-conn (-> client
+                 (ensure-db "hodur-test")))
+
+(datomic/transact db-conn {:tx-data [{:employee/email "tl@work.co"
+                                      :employee/first-name "Tiago"
+                                      :employee/last-name "Luchini"}
+                                     {:employee/email "me@work.co"
+                                      :employee/first-name "Marcelo"
+                                      :employee/last-name "Eduardo"}
+                                     {:employee/email "zeh@work.co"
+                                      :employee/first-name "Zeh"
+                                      :employee/last-name "Fernandes"
+                                      :employee/supervisor [:employee/email "tl@work.co"]}]})
+
 (def compiled-schema (-> lacinia-schema
                          (l-util/attach-resolvers
                           {:bla bla
                            :employee/full-name-resolver full-name-resolver})
-                         (attach-resolvers conn nil)
+                         (attach-resolvers conn db-conn)
                          l-schema/compile))
+
+
 
 #_(lacinia/execute compiled-schema
                    "{ A: employeeByEmail (email: \"foo\") { firstName lastName fullName }
@@ -349,6 +486,17 @@
                    "{ employeeByEmail (email: \"foo\") { fullName firstName projects { name } supervisor { fullName } } }"
                    nil nil)
 
-(lacinia/execute compiled-schema
-                 "{ employeeByEmail (email: \"foo\") { fullName supervisor { firstName } reportees { lastName } } }"
-                 nil nil)
+(lacinia/execute
+ compiled-schema
+ "{ employeeByEmail (email: \"tl@work.co\") { fullName supervisor { firstName } reportees { lastName } } }"
+ nil nil)
+
+#_(lacinia/execute
+   compiled-schema
+   "{ employeesWithOffsetAndLimit { fullName supervisor { firstName } reportees { lastName } } }"
+   nil nil)
+
+#_(lacinia/execute
+   compiled-schema
+   "{ employeeByEmail (email: \"zeh@work.co\") { fullName firstName supervisor { fullName } } }"
+   nil nil)
