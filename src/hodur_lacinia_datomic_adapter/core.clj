@@ -20,9 +20,9 @@
 (defn ^:private pull-param-type
   [param]
   (cond
-    (:lacinia->datomic/eid param)    :eid
-    (:lacinia->datomic/lookup param) :lookup
-    :else                            :unknown))
+    (:lacinia->datomic.param/eid param)    :eid
+    (:lacinia->datomic.param/lookup param) :lookup
+    :else                                  :unknown))
 
 (defn ^:private extract-lacinia-selections
   [context]
@@ -59,12 +59,12 @@
                       :param/_parent [*]}]
         eids (-> (q/q '[:find ?f
                         :where
-                        [?f :lacinia->datomic/type :pull]
+                        [?f :lacinia->datomic.query/type :pull]
                         [?f :field/parent ?t]
                         [?t :lacinia/query true]
                         [?p :param/parent ?f]
-                        (or [?p :lacinia->datomic/lookup]
-                            [?p :lacinia->datomic/eid])]
+                        (or [?p :lacinia->datomic.param/lookup]
+                            [?p :lacinia->datomic.param/eid])]
                       @engine-conn)
                  vec flatten)]
     (->> eids
@@ -76,16 +76,12 @@
                       :param/_parent [*]}]
         eids (-> (q/q '[:find ?f
                         :where
-                        [?f :lacinia->datomic/type :find]
+                        [?f :lacinia->datomic.query/type :find]
                         [?f :field/parent ?t]
                         [?t :lacinia/query true]
                         [?p :param/parent ?f]
-                        (or [?p :lacinia->datomic/offset]
-                            [?p :lacinia->datomic/limit]
-                            [?p :lacinia->datomic/first]
-                            [?p :lacinia->datomic/last]
-                            [?p :lacinia->datomic/after]
-                            [?p :lacinia->datomic/before])]
+                        (or [?p :lacinia->datomic.param/offset]
+                            [?p :lacinia->datomic.param/limit])]
                       @engine-conn)
                  vec flatten)]
     (->> eids
@@ -102,10 +98,10 @@
                        ['?f :datomic/tag true]]
         where-depends [['?f :field/parent '?tp]
                        ['?tp :type/PascalCaseName lacinia-type-name]
-                       ['?f :lacinia->datomic/depends-on]]
+                       ['?f :lacinia->datomic.field/depends-on]]
         where-reverse [['?f :field/parent '?tp]
                        ['?tp :type/PascalCaseName lacinia-type-name]
-                       ['?f :lacinia->datomic/reverse-lookup]]
+                       ['?f :lacinia->datomic.field/reverse-lookup]]
         where-dbid [['?f :field/parent '?tp]
                     ['?tp :type/PascalCaseName lacinia-type-name]
                     ['?f :lacinia->datomic.field/dbid true]]
@@ -149,8 +145,8 @@
   [type-name fields]
   (reduce (fn [m {:keys [field/camelCaseName
                          field/kebab-case-name
-                         lacinia->datomic/reverse-lookup
-                         lacinia->datomic/depends-on
+                         lacinia->datomic.field/reverse-lookup
+                         lacinia->datomic.field/depends-on
                          lacinia->datomic.field/dbid] :as field}]
             (let [datomic-field-name
                   (cond
@@ -167,7 +163,7 @@
   [fields]
   (reduce (fn [m {:keys [field/camelCaseName
                          field/kebab-case-name
-                         lacinia->datomic/reverse-lookup
+                         lacinia->datomic.field/reverse-lookup
                          lacinia->datomic.field/dbid] :as field}]
             (let [datomic-field-name
                   (cond
@@ -229,29 +225,29 @@
               (assoc m (:param/camelCaseName param)
                      {:type (pull-param-type param)
                       :ident (case (pull-param-type param)
-                               :lookup (:lacinia->datomic/lookup param)
+                               :lookup (:lacinia->datomic.param/lookup param)
                                :none)
-                      :transform (:lacinia->datomic/transform param)}))
+                      :transform (:lacinia->datomic.param/transform param)}))
             {} _parent)
      :arg-name (:param/camelCaseName pull-param)
      :arg-type arg-type
-     :transform (:lacinia->datomic/transform pull-param)
+     :transform (:lacinia->datomic.param/transform pull-param)
      :ident (if (= :lookup arg-type)
-              (:lacinia->datomic/lookup pull-param)
+              (:lacinia->datomic.param/lookup pull-param)
               :none)}))
 
-;;FIXME will needs something along these lines when :find is done
-#_(defn ^:private field->resolve-find-entry
-    [{:keys [field/camelCaseName field/parent param/_parent] :as field}]
-    (let [pull-param (first _parent)
-          arg-type (pull-param-type pull-param)]
-      {:resolve-type :find
-       :field-name camelCaseName
-       :arg-name (:param/camelCaseName pull-param)
-       :arg-type arg-type
-       :ident (if (= :lookup arg-type)
-                (:lacinia->datomic/lookup pull-param)
-                :none)}))
+(defn ^:private field->resolve-find-entry
+  [{:keys [field/camelCaseName field/parent param/_parent] :as field}]
+  ;;FIXME will needs something along these lines when :find is done
+  (let [pull-param (first _parent)
+        arg-type (pull-param-type pull-param)]
+    {:resolve-type :find
+     :field-name camelCaseName
+     :arg-name (:param/camelCaseName pull-param)
+     :arg-type arg-type
+     :ident (if (= :lookup arg-type)
+              (:lacinia->datomic.param/lookup pull-param)
+              :none)}))
 
 (defn ^:private build-pull-eid
   [inboud-args engine-args]
@@ -341,8 +337,8 @@
 
      ^{:type String
        :lacinia/resolve :employee/full-name-resolver
-       :lacinia->datomic/depends-on [:employee/first-name
-                                     :employee/last-name]}
+       :lacinia->datomic.field/depends-on [:employee/first-name
+                                           :employee/last-name]}
      full-name
      
      ^{:type Employee
@@ -351,7 +347,7 @@
 
      ^{:type Employee
        :cardinality [0 n]
-       :lacinia->datomic/reverse-lookup :employee/_supervisor}
+       :lacinia->datomic.field/reverse-lookup :employee/_supervisor}
      reportees
      
      ^{:type Project
@@ -373,51 +369,36 @@
       :lacinia/query true}
     QueryRoot
     [^{:type Employee
-       :lacinia->datomic/type :pull}
+       :lacinia->datomic.query/type :pull}
      employee
      [^{:type String
         :optional true
-        :lacinia->datomic/lookup :employee/email
-        :lacinia->datomic/transform hodur-lacinia-datomic-adapter.core/transform-email}
+        :lacinia->datomic.param/lookup :employee/email
+        :lacinia->datomic.param/transform hodur-lacinia-datomic-adapter.core/transform-email}
       email
       ^{:type ID
         :optional true
-        :lacinia->datomic/eid true}
-      id]
-
-     ^{:type Employee
-       :lacinia->datomic/type :pull}
-     employeeByEmail
-     [^{:type String
-        :lacinia->datomic/lookup :employee/email
-        :lacinia->datomic/transform hodur-lacinia-datomic-adapter.core/transform-email}
-      email]
-
-     ^{:type Employee
-       :lacinia->datomic/type :pull}
-     employeeById
-     [^{:type Integer
-        :lacinia->datomic/eid true}
+        :lacinia->datomic.param/eid true}
       id]
 
      ^{:type Employee
        :cardinality [0 n]
-       :lacinia->datomic/type :find}
+       :lacinia->datomic.query/type :find}
      employeesWithOffsetAndLimit
      [^{:type Integer
         :optional true
         :default 0 
-        :lacinia->datomic/offset true}
+        :lacinia->datomic.param/offset true}
       offset
       ^{:type Integer
         :optional true
         :default 50
-        :lacinia->datomic/limit true}
+        :lacinia->datomic.param/limit true}
       limit]
 
      #_^{:type Employee
          :cardinality [0 n]
-         :lacinia->datomic/type :find
+         :lacinia->datomic.query/type :find
          :lacinia/resolve :bla}
      employeesWithFirstAfter
      #_[^{:type Integer
@@ -532,5 +513,7 @@
 
 (lacinia/execute
  compiled-schema
- "{ employee (id: \"42630264832131144\") { id fullName firstName supervisor { fullName } } }"
- nil nil)
+ "{ A:employee (id: \"42630264832131144\") { id fullName firstName supervisor { fullName } }
+    B:employee (email: \"zeh@work.co\") { id fullName firstName supervisor { fullName } }}"
+ nil nil
+ )
