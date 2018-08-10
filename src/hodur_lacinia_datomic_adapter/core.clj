@@ -106,16 +106,26 @@
         where-reverse [['?f :field/parent '?tp]
                        ['?tp :type/PascalCaseName lacinia-type-name]
                        ['?f :lacinia->datomic/reverse-lookup]]
+        where-dbid [['?f :field/parent '?tp]
+                    ['?tp :type/PascalCaseName lacinia-type-name]
+                    ['?f :lacinia->datomic.field/dbid true]]
+
         query-datomic (concat '[:find ?f :where] where-datomic)
         query-depends (concat '[:find ?f :where] where-depends)
         query-reverse (concat '[:find ?f :where] where-reverse)
+        query-dbid (concat '[:find ?f :where] where-dbid)
+
         eids-datomic (-> (q/q query-datomic @engine-conn)
                          vec flatten)
         eids-depends (-> (q/q query-depends @engine-conn)
                          vec flatten)
         eids-reverse (-> (q/q query-reverse @engine-conn)
                          vec flatten)
-        eids (concat eids-datomic eids-depends eids-reverse)]
+        eids-dbid (-> (q/q query-dbid @engine-conn)
+                      vec flatten)
+
+        eids (concat eids-datomic eids-depends
+                     eids-reverse eids-dbid)]
     (->> eids
          (d/pull-many @engine-conn selector))))
 
@@ -125,8 +135,9 @@
                       :field/type [*]}]
         query '[:find ?f
                 :where
-                [?f :datomic/tag true]
-                [?f :field/name]]
+                [?f :field/name]
+                (or [?f :lacinia->datomic.field/dbid true]
+                    [?f :datomic/tag true])]
         eids (-> (q/q query @engine-conn)
                  vec flatten)]
     (->> eids
@@ -139,15 +150,16 @@
   (reduce (fn [m {:keys [field/camelCaseName
                          field/kebab-case-name
                          lacinia->datomic/reverse-lookup
-                         lacinia->datomic/depends-on] :as field}]
+                         lacinia->datomic/depends-on
+                         lacinia->datomic.field/dbid] :as field}]
             (let [datomic-field-name
-                  (if depends-on
-                    depends-on
-                    (if reverse-lookup
-                      [reverse-lookup]
-                      [(keyword
-                        (->kebab-case-string type-name)
-                        (name kebab-case-name))]))]
+                  (cond
+                    dbid           [:db/id]
+                    depends-on     depends-on
+                    reverse-lookup [reverse-lookup]
+                    :else          [(keyword
+                                     (->kebab-case-string type-name)
+                                     (name kebab-case-name))])]
               (assoc m camelCaseName datomic-field-name)))
           {} fields))
 
@@ -155,13 +167,15 @@
   [fields]
   (reduce (fn [m {:keys [field/camelCaseName
                          field/kebab-case-name
-                         lacinia->datomic/reverse-lookup] :as field}]
+                         lacinia->datomic/reverse-lookup
+                         lacinia->datomic.field/dbid] :as field}]
             (let [datomic-field-name
-                  (if reverse-lookup
-                    reverse-lookup
-                    (keyword
-                     (name (-> field :field/parent :type/kebab-case-name))
-                     (name kebab-case-name)))]
+                  (cond
+                    dbid           :db/id
+                    reverse-lookup reverse-lookup
+                    :else          (keyword
+                                    (name (-> field :field/parent :type/kebab-case-name))
+                                    (name kebab-case-name)))]
               (assoc m datomic-field-name camelCaseName)))
           {} fields))
 
@@ -248,7 +262,7 @@
                                in-arg-val)]
                  (if type
                    (reduced (cond
-                              (= :eid type) arg-val
+                              (= :eid type) (Long/parseLong arg-val)
                               (= :lookup type) [ident arg-val])))))
              nil inboud-args))
 
@@ -274,8 +288,14 @@
                                                      extract-lacinia-selections
                                                      (find-selection-by-field field-name))
                                 selector (build-datomic-selector field-selection engine-conn)
-                                eid (build-pull-eid args (:args field-entry) )
+                                eid (build-pull-eid args (:args field-entry))
                                 db (datomic/db db-conn)]
+                            (println "Resolving pull for args" args)
+                            (println "selector:")
+                            (clojure.pprint/pprint selector)
+                            (println "eid:")
+                            (println eid)
+                            (println "------")
                             (-> db
                                 (datomic/pull selector eid)
                                 (build-lacinia-response engine-conn)))))
@@ -302,10 +322,14 @@
   v)
 
 (def s
-  '[^{:datomic/tag-recursive {:except [full-name reportees]}
+  '[^{:datomic/tag-recursive {:except [id full-name reportees]}
       :lacinia/tag-recursive true}
     Employee
-    [^{:type String
+    [^{:type ID
+       :lacinia->datomic.field/dbid true}
+     id
+     
+     ^{:type String
        :datomic/unique :db.unique/identity}
      email
 
@@ -356,7 +380,7 @@
         :lacinia->datomic/lookup :employee/email
         :lacinia->datomic/transform hodur-lacinia-datomic-adapter.core/transform-email}
       email
-      ^{:type Integer
+      ^{:type ID
         :optional true
         :lacinia->datomic/eid true}
       id]
@@ -501,7 +525,12 @@
    nil nil)
 
 
+#_(lacinia/execute
+   compiled-schema
+   "{ employee (email: \"zeh@work.co\") { id fullName firstName supervisor { fullName } } }"
+   nil nil)
+
 (lacinia/execute
  compiled-schema
- "{ employee (email: \"zeh@work.co\") { fullName firstName supervisor { fullName } } }"
+ "{ employee (id: \"42630264832131144\") { id fullName firstName supervisor { fullName } } }"
  nil nil)
