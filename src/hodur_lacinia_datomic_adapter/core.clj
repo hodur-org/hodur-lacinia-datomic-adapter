@@ -132,14 +132,6 @@
     (->> eids
          (d/pull-many @engine-conn selector))))
 
-{:employee/first-name :firstName
- :employee/projects :projects
- :employee/_supervisor :reportees}
-
-{:fullName [:employee/first-name :employee/last-name]
- :firstName [:employee/first-name]
- :reportees [:employee/_supervisor]}
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn ^:private lacinia->datomic-map
@@ -174,34 +166,6 @@
           {} fields))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-#_(defn ^:private build-datomic-selector
-    [field-selection engine-conn]
-    (let [inner-selections (:selections field-selection)
-          type-name (extract-lacinia-type-name field-selection)
-          fields (query-datomic-fields-on-lacinia-type type-name engine-conn)]
-      (vec
-       (reduce
-        (fn [c selection]
-          (if-let [field (find-field-on-lacinia-field-name
-                          (:field selection) fields)]
-            (let [field-name (:field/name field)
-                  reverse-loopkup (:lacinia->datomic/reverse-lookup field)
-                  datomic-field-name (if reverse-loopkup
-                                       reverse-loopkup
-                                       (keyword
-                                        (->kebab-case-string type-name)
-                                        (->kebab-case-string field-name)))
-                  selection-selections (:selections selection)
-                  depends-on (:lacinia->datomic/depends-on field)]
-              (if depends-on
-                (apply conj c depends-on)
-                (if selection-selections
-                  (conj c (assoc {} datomic-field-name
-                                 (build-datomic-selector selection engine-conn)))
-                  (conj c datomic-field-name))))
-            c))
-        #{} inner-selections))))
 
 (defn ^:private build-datomic-selector
   [field-selection engine-conn]
@@ -246,6 +210,15 @@
         arg-type (pull-param-type pull-param)]
     {:resolve-type :pull
      :field-name camelCaseName
+     :args (reduce
+            (fn [m param]
+              (assoc m (:param/camelCaseName param)
+                     {:type (pull-param-type param)
+                      :ident (case (pull-param-type param)
+                               :lookup (:lacinia->datomic/lookup param)
+                               :none)
+                      :transform (:lacinia->datomic/transform param)}))
+            {} _parent)
      :arg-name (:param/camelCaseName pull-param)
      :arg-type arg-type
      :transform (:lacinia->datomic/transform pull-param)
@@ -253,17 +226,31 @@
               (:lacinia->datomic/lookup pull-param)
               :none)}))
 
-(defn ^:private field->resolve-find-entry
-  [{:keys [field/camelCaseName field/parent param/_parent] :as field}]
-  (let [pull-param (first _parent)
-        arg-type (pull-param-type pull-param)]
-    {:resolve-type :find
-     :field-name camelCaseName
-     :arg-name (:param/camelCaseName pull-param)
-     :arg-type arg-type
-     :ident (if (= :lookup arg-type)
-              (:lacinia->datomic/lookup pull-param)
-              :none)}))
+;;FIXME will needs something along these lines when :find is done
+#_(defn ^:private field->resolve-find-entry
+    [{:keys [field/camelCaseName field/parent param/_parent] :as field}]
+    (let [pull-param (first _parent)
+          arg-type (pull-param-type pull-param)]
+      {:resolve-type :find
+       :field-name camelCaseName
+       :arg-name (:param/camelCaseName pull-param)
+       :arg-type arg-type
+       :ident (if (= :lookup arg-type)
+                (:lacinia->datomic/lookup pull-param)
+                :none)}))
+
+(defn ^:private build-pull-eid
+  [inboud-args engine-args]
+  (reduce-kv (fn [a in-arg-name in-arg-val]
+               (let [{:keys [type ident transform]} (get engine-args in-arg-name)
+                     arg-val (if transform
+                               ((find-var transform) in-arg-val)
+                               in-arg-val)]
+                 (if type
+                   (reduced (cond
+                              (= :eid type) arg-val
+                              (= :lookup type) [ident arg-val])))))
+             nil inboud-args))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -287,12 +274,7 @@
                                                      extract-lacinia-selections
                                                      (find-selection-by-field field-name))
                                 selector (build-datomic-selector field-selection engine-conn)
-                                arg-val (if transform
-                                          ((find-var transform) (get args arg-name))
-                                          (get args arg-name))
-                                eid (cond
-                                      (= :eid arg-type) arg-val
-                                      (= :lookup arg-type) [ident arg-val])
+                                eid (build-pull-eid args (:args field-entry) )
                                 db (datomic/db db-conn)]
                             (-> db
                                 (datomic/pull selector eid)
@@ -323,18 +305,21 @@
   '[^{:datomic/tag-recursive {:except [full-name reportees]}
       :lacinia/tag-recursive true}
     Employee
-    [^String first-name
-     ^String last-name
+    [^{:type String
+       :datomic/unique :db.unique/identity}
+     email
+
+     ^String
+     first-name
+
+     ^String
+     last-name
 
      ^{:type String
        :lacinia/resolve :employee/full-name-resolver
        :lacinia->datomic/depends-on [:employee/first-name
                                      :employee/last-name]}
      full-name
-
-     ^{:type String
-       :datomic/unique :db.unique/identity}
-     email
      
      ^{:type Employee
        :optional true}
@@ -364,6 +349,19 @@
       :lacinia/query true}
     QueryRoot
     [^{:type Employee
+       :lacinia->datomic/type :pull}
+     employee
+     [^{:type String
+        :optional true
+        :lacinia->datomic/lookup :employee/email
+        :lacinia->datomic/transform hodur-lacinia-datomic-adapter.core/transform-email}
+      email
+      ^{:type Integer
+        :optional true
+        :lacinia->datomic/eid true}
+      id]
+
+     ^{:type Employee
        :lacinia->datomic/type :pull}
      employeeByEmail
      [^{:type String
@@ -497,7 +495,13 @@
    "{ employeesWithOffsetAndLimit { fullName supervisor { firstName } reportees { lastName } } }"
    nil nil)
 
+#_(lacinia/execute
+   compiled-schema
+   "{ employeeByEmail (email: \"zeh@work.co\") { fullName firstName supervisor { fullName } } }"
+   nil nil)
+
+
 (lacinia/execute
  compiled-schema
- "{ employeeByEmail (email: \"zeh@work.co\") { fullName firstName supervisor { fullName } } }"
+ "{ employee (email: \"zeh@work.co\") { fullName firstName supervisor { fullName } } }"
  nil nil)
