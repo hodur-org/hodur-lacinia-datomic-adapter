@@ -421,11 +421,17 @@
      ^{:type Integer}
      current-offset
 
+     ^{:type Boolean}
+     has-next
+     
      ^{:type Integer}
      next-offset
 
+     ^{:type Boolean}
+     has-prev
+     
      ^{:type Integer}
-     prev-offset] 
+     prev-offset]
     
     ^{:lacinia/tag-recursive true
       :lacinia/query true}
@@ -591,3 +597,85 @@
      [?e :employee/email "tl@work.co"]
      [?r :employee/supervisor ?e]]
    (datomic/db db-conn))
+
+
+(datomic/q
+ '[:find ?e (count ?r)
+   :where
+   [?e :employee/email "tl@work.co"]
+   [?r :employee/supervisor ?e]]
+ (datomic/db db-conn))
+
+
+(datomic/q
+ '[:find ?e
+   :where
+   [?e :employee/email "zeh@work.co"]]
+ (datomic/db db-conn))
+
+(def all-eids
+  (flatten
+   (datomic/q
+    {:query '[:find ?e
+              :where
+              [?e :employee/first-name]]
+     :args [(datomic/db db-conn)]
+     :limit 2
+     :offset 1})))
+
+(defn pull-many
+  [db selector eids]
+  (map #(datomic/pull db selector %)
+       eids))
+
+(defn fetch-page
+  ([db selector where]
+   (fetch-list db selector where nil))
+  ([db selector where {:keys [offset limit] :or {offset 0 limit -1}}]
+   (let [eids
+         (-> (datomic/q {:query (concat '[:find ?e :where] where)
+                         :args [db]
+                         :limit limit
+                         :offset offset})
+             flatten)
+         total-count
+         (-> (datomic/q {:query (concat '[:find (count ?e) :where] where)
+                         :args [db]})
+             flatten
+             first)
+         has-prev (>= (- offset limit) 0)
+         has-next (<= (+ offset limit) total-count)]
+     {:total-count total-count
+      :page-info {:total-pages (int (Math/ceil (/ total-count limit)))
+                  :current-page (int (Math/ceil (/ offset limit)))
+                  :page-size limit
+                  :current-offset offset
+                  :has-prev has-prev
+                  :prev-offset (if has-prev (- offset limit) 0)
+                  :has-next has-next
+                  :next-offset (if has-next (+ offset limit) offset)}
+      :nodes (pull-many db selector eids)})))
+
+(->> (fetch-page (datomic/db db-conn)
+                 '[:employee/first-name]
+                 [['?e :employee/first-name]]
+                 {:limit 2
+                  :offset 4}))
+
+(datomic/q
+ '[:find (count ?e)
+   :where
+   [?e :employee/first-name]]
+ (datomic/db db-conn))
+
+
+
+
+
+(pull-many (datomic/db db-conn)
+           '[:employee/first-name]
+           [42630264832131144 37418579716472906])
+
+(pull-many (datomic/db db-conn)
+           '[:employee/first-name]
+           all-eids)
