@@ -8,10 +8,11 @@
             [datomic.client.api :as datomic]
             [datascript.core :as d]
             [datascript.query-v3 :as q]
+            [hodur-lacinia-datomic-adapter.pagination :as pagination]
             ;;FIXME: these below are probably not needed
             [hodur-engine.core :as engine]
             [hodur-lacinia-schema.core :as hls]
-            [hodur-datomic-schema.core :as hds]
+            [hodur-datomic-schema.core :as hds] 
             [com.walmartlabs.lacinia.util :as l-util]
             [com.walmartlabs.lacinia.schema :as l-schema]
             [com.walmartlabs.lacinia :as lacinia]))
@@ -34,9 +35,9 @@
   [{:keys [field-definition] :as selection}]
   (let [kind (-> field-definition :type :kind)]
     (case kind
-      :list (-> field-definition :type :type :type :type)
+      :list     (-> field-definition :type :type :type :type)
       :non-null (-> field-definition :type :type :type)
-      :root (-> field-definition :type :type))))
+      :root     (-> field-definition :type :type))))
 
 (defn ^:private find-selection-by-field
   [field-name selections]
@@ -90,7 +91,7 @@
 (defn ^:private query-datomic-fields-on-lacinia-type
   [lacinia-type-name engine-conn]
   ;;The reason I had to break into multiple queries is that datascript's `or
-  ;;it returns a union instead  (it's prob a bug on `q)
+  ;;returns a union instead  (it's prob a bug on `q)
   (let [selector '[* {:field/parent [*]
                       :field/type [*]}]
         where-datomic [['?f :field/parent '?tp]
@@ -326,7 +327,7 @@
   v)
 
 (def s
-  '[^{:datomic/tag-recursive {:except [id full-name reportees]}
+  '[^{:datomic/tag-recursive {:except [id full-name reportees offset limit]}
       :lacinia/tag-recursive true}
     Employee
     [^{:type ID
@@ -353,10 +354,19 @@
        :optional true}
      supervisor
 
-     ^{:type Employee
-       :cardinality [0 n]
+     ^{:type EmployeeList
        :lacinia->datomic.field/reverse-lookup :employee/_supervisor}
      reportees
+     [^{:type Integer
+        :optional true
+        :default 0 
+        :lacinia->datomic.param/offset true}
+      offset
+      ^{:type Integer
+        :optional true
+        :default 50
+        :lacinia->datomic.param/limit true}
+      limit]
      
      ^{:type Project
        :cardinality [0 n]}
@@ -372,6 +382,50 @@
       :enum true}
     EmploymentType
     [FULL_TIME PART_TIME]
+
+    ^{:lacinia/tag-recursive true}
+    ProjectList
+    [^Integer
+     total-count
+     
+     ^PageInfo
+     page-info
+
+     ^{:type Project
+       :cardinality [0 n]}
+     nodes]
+
+    ^{:lacinia/tag-recursive true}
+    EmployeeList
+    [^Integer
+     total-count
+     
+     ^PageInfo
+     page-info
+
+     ^{:type Employee
+       :cardinality [0 n]}
+     nodes]
+    
+    ^{:lacinia/tag-recursive true}
+    PageInfo
+    [^{:type Integer}
+     total-pages
+
+     ^{:type Integer}
+     current-page
+
+     ^{:type Integer}
+     page-size
+     
+     ^{:type Integer}
+     current-offset
+
+     ^{:type Integer}
+     next-offset
+
+     ^{:type Integer}
+     prev-offset] 
     
     ^{:lacinia/tag-recursive true
       :lacinia/query true}
@@ -389,10 +443,9 @@
         :lacinia->datomic.param/eid true}
       id]
 
-     ^{:type Employee
-       :cardinality [0 n]
+     ^{:type EmployeeList
        :lacinia->datomic.query/type :find}
-     employeesWithOffsetAndLimit
+     employees
      [^{:type Integer
         :optional true
         :default 0 
@@ -402,29 +455,7 @@
         :optional true
         :default 50
         :lacinia->datomic.param/limit true}
-      limit]
-
-     #_^{:type Employee
-         :cardinality [0 n]
-         :lacinia->datomic.query/type :find
-         :lacinia/resolve :bla}
-     employeesWithFirstAfter
-     #_[^{:type Integer
-          :optional true
-          :lacinia->datomic/first true}
-        first
-        ^{:type Integer
-          :optional true
-          :lacinia->datomic/last true}
-        last
-        ^{:type ID
-          :optional true
-          :lacinia->datomic/before true}
-        before
-        ^{:type ID
-          :optional true
-          :lacinia->datomic/after true}
-        after]]])
+      limit]]])
 
 (def conn (engine/init-schema s))
 
@@ -533,3 +564,30 @@
     B:employee (email: \"zeh@work.co\") { id fullName firstName supervisor { fullName } }}"
    nil nil
    )
+
+
+#_(clojure.pprint/pprint
+   (datomic/pull (datomic/db db-conn)
+                 '[:db/id
+                   :employee/first-name
+                   :employee/last-name
+                   {(:employee/_supervisor :limit 1 :offset 200) [:employee/first-name :employee/last-name]}]
+                 [:employee/email "tl@work.co"]))
+
+
+#_(datomic/q
+   '[:find (pull ?e [:db/id
+                     :employee/first-name
+                     :employee/last-name
+                     {(:employee/_supervisor :limit 1 :offset 200) [:employee/first-name :employee/last-name]}]) (count ?r)
+     :where
+     [?e :employee/email "tl@work.co"
+      ?e :employee/_supervisor ?r]]
+   (datomic/db db-conn))
+
+#_(datomic/q
+   '[:find ?e (count ?r)
+     :where
+     [?e :employee/email "tl@work.co"]
+     [?r :employee/supervisor ?e]]
+   (datomic/db db-conn))
