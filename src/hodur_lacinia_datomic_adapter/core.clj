@@ -133,7 +133,8 @@
                 :where
                 [?f :field/name]
                 (or [?f :lacinia->datomic.field/dbid true]
-                    [?f :datomic/tag true])]
+                    [?f :datomic/tag true]
+                    [?f :lacinia->datomic.field/reverse-lookup])]
         eids (-> (q/q query @engine-conn)
                  vec flatten)]
     (->> eids
@@ -198,12 +199,19 @@
 
 (defn ^:private reduce-lacinia-response
   [datomic-obj datomic->lacinia]
-  (reduce-kv (fn [m k v]
+  (reduce-kv (fn [m k v] 
                (let [lacinia-field-name (get datomic->lacinia k)]
-                 (if (map? v)
+                 (cond
+                   (map? v)
                    (assoc m lacinia-field-name
                           (reduce-lacinia-response v datomic->lacinia))
-                   (assoc m lacinia-field-name v))))
+
+                   (vector? v)
+                   (assoc m lacinia-field-name
+                          (map #(reduce-lacinia-response % datomic->lacinia)
+                               v))
+
+                   :else (assoc m lacinia-field-name v))))
              {} datomic-obj))
 
 (defn ^:private build-lacinia-response
@@ -465,6 +473,14 @@
                                      {:employee/email "zeh@work.co"
                                       :employee/first-name "Zeh"
                                       :employee/last-name "Fernandes"
+                                      :employee/supervisor [:employee/email "tl@work.co"]}
+                                     {:employee/email "a@work.co"
+                                      :employee/first-name "A"
+                                      :employee/last-name "Fernandes"
+                                      :employee/supervisor [:employee/email "tl@work.co"]}
+                                     {:employee/email "b@work.co"
+                                      :employee/first-name "B"
+                                      :employee/last-name "Fernandes"
                                       :employee/supervisor [:employee/email "tl@work.co"]}]})
 
 (def compiled-schema (-> lacinia-schema
@@ -506,14 +522,14 @@
    nil nil)
 
 
-#_(lacinia/execute
-   compiled-schema
-   "{ employee (email: \"zeh@work.co\") { id fullName firstName supervisor { fullName } } }"
-   nil nil)
-
 (lacinia/execute
  compiled-schema
- "{ A:employee (id: \"42630264832131144\") { id fullName firstName supervisor { fullName } }
+ "{ employee (email: \"tl@work.co\") { id fullName supervisor { fullName } reportees { firstName fullName } } }"
+ nil nil)
+
+#_(lacinia/execute
+   compiled-schema
+   "{ A:employee (id: \"42630264832131144\") { id fullName firstName supervisor { fullName } reportees { id fullName } }
     B:employee (email: \"zeh@work.co\") { id fullName firstName supervisor { fullName } }}"
- nil nil
- )
+   nil nil
+   )
