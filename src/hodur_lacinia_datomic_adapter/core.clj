@@ -9,6 +9,7 @@
             [datascript.core :as d]
             [datascript.query-v3 :as q]
             [hodur-lacinia-datomic-adapter.pagination :as pagination]
+            [com.walmartlabs.lacinia.resolve :as resolve]
             ;;FIXME: these below are probably not needed
             [hodur-engine.core :as engine]
             [hodur-lacinia-schema.core :as hls]
@@ -17,6 +18,74 @@
             [com.walmartlabs.lacinia.schema :as l-schema]
             [com.walmartlabs.lacinia :as lacinia]))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;FIXME Datomic does not understand (:db/id :as :id) as a selector, so we need to help it
+(defn ^:private find-target-id
+  [selector]
+  (some->> selector
+           (filter seq?)
+           (filter #(= :db/id (first %)))
+           first
+           last))
+;;FIXME Datomic does not understand (:db/id :as :id) as a selector, so we need to help it
+(defn ^:private fix-db-id 
+  [m target-id-name]
+  (if-let [v (get m :db/id)]
+    (-> m
+        (dissoc :db/id)
+        (assoc target-id-name v))
+    m))
+
+;;FIXME Datomic does not understand (:db/id :as :id) as a selector, so we need to help it
+(defn ^:private fix-db-ids
+  [c target-id-name]
+  (map #(fix-db-id % target-id-name) c))
+
+(defn ^:private pull-many
+  [db selector eids]
+  (map #(datomic/pull db selector %)
+       eids))
+
+(defn ^:private fetch-page
+  ([db selector find where]
+   (fetch-page db selector where nil))
+  ([db selector find where {:keys [offset limit] :or {offset 0 limit -1}}]
+   (let [eids
+         (-> (datomic/q {:query (concat `[:find ~find :where] where)
+                         :args [db]
+                         :limit limit
+                         :offset offset})
+             flatten)
+         total-count
+         (or (-> (datomic/q {:query (concat `[:find (~'count ~find) :where] where)
+                             :args [db]})
+                 flatten
+                 first)
+             0)
+         has-prev (>= (- offset limit) 0)
+         has-next (<= (+ offset limit) total-count)
+         target-id-name (find-target-id selector)]
+     {:totalCount total-count
+      :pageInfo {:totalPages (int (Math/ceil (/ total-count limit)))
+                 :currentPage (int (Math/ceil (/ offset limit)))
+                 :pageSize limit
+                 :currentOffset offset
+                 :hasPrev has-prev
+                 :prevOffset (if has-prev (- offset limit) 0)
+                 :hasNext has-next
+                 :nextOffset (if has-next (+ offset limit) offset)}
+      :nodes (fix-db-ids (pull-many db selector eids) target-id-name)})))
+
+(defn ^:private fetch-one
+  [db selector find where]
+  (let [eid (-> (datomic/q {:query (concat `[:find ~find :where] where)
+                            :args [db]})
+                flatten first)
+        target-id-name (find-target-id selector)]
+    (fix-db-id (datomic/pull db selector eid) target-id-name)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn ^:private pull-param-type
   [param]
@@ -35,7 +104,7 @@
   [{:keys [field-definition] :as selection}]
   (let [kind (-> field-definition :type :kind)]
     (case kind
-      :list     (-> field-definition :type :type :type :type)
+      :list     (extract-lacinia-type-name {:field-definition (-> field-definition :type)})
       :non-null (-> field-definition :type :type :type)
       :root     (-> field-definition :type :type))))
 
@@ -88,6 +157,23 @@
     (->> eids
          (d/pull-many @engine-conn selector))))
 
+(defn ^:private query-resolve-lookup-fields
+  [engine-conn]
+  (let [selector '[:field/camelCaseName
+                   :field/kebab-case-name
+                   :lacinia->datomic.field/lookup
+                   :lacinia->datomic.field/reverse-lookup
+                   {:field/parent [:type/PascalCaseName
+                                   :type/kebab-case-name]}]
+        eids (-> (q/q '[:find ?f
+                        :where
+                        (or [?f :lacinia->datomic.field/lookup]
+                            [?f :lacinia->datomic.field/reverse-lookup])]
+                      @engine-conn)
+                 vec flatten)]
+    (->> eids
+         (d/pull-many @engine-conn selector))))
+
 (defn ^:private query-datomic-fields-on-lacinia-type
   [lacinia-type-name engine-conn]
   ;;The reason I had to break into multiple queries is that datascript's `or
@@ -100,29 +186,22 @@
         where-depends [['?f :field/parent '?tp]
                        ['?tp :type/PascalCaseName lacinia-type-name]
                        ['?f :lacinia->datomic.field/depends-on]]
-        where-reverse [['?f :field/parent '?tp]
-                       ['?tp :type/PascalCaseName lacinia-type-name]
-                       ['?f :lacinia->datomic.field/reverse-lookup]]
         where-dbid [['?f :field/parent '?tp]
                     ['?tp :type/PascalCaseName lacinia-type-name]
                     ['?f :lacinia->datomic.field/dbid true]]
 
         query-datomic (concat '[:find ?f :where] where-datomic)
         query-depends (concat '[:find ?f :where] where-depends)
-        query-reverse (concat '[:find ?f :where] where-reverse)
         query-dbid (concat '[:find ?f :where] where-dbid)
 
         eids-datomic (-> (q/q query-datomic @engine-conn)
                          vec flatten)
         eids-depends (-> (q/q query-depends @engine-conn)
                          vec flatten)
-        eids-reverse (-> (q/q query-reverse @engine-conn)
-                         vec flatten)
         eids-dbid (-> (q/q query-dbid @engine-conn)
                       vec flatten)
 
-        eids (concat eids-datomic eids-depends
-                     eids-reverse eids-dbid)]
+        eids (concat eids-datomic eids-depends eids-dbid)]
     (->> eids
          (d/pull-many @engine-conn selector))))
 
@@ -152,15 +231,19 @@
                          lacinia->datomic.field/dbid] :as field}]
             (let [datomic-field-name
                   (cond
-                    dbid           [:db/id]
-                    depends-on     depends-on
-                    reverse-lookup [reverse-lookup]
-                    :else          [(keyword
-                                     (->kebab-case-string type-name)
-                                     (name kebab-case-name))])]
+                    dbid           [(list :db/id :as camelCaseName)]
+                    depends-on     (->> depends-on
+                                        (map #(list % :as (-> % name ->camelCaseKeyword)))
+                                        vec)
+                    :else          [(list (keyword
+                                           (->kebab-case-string type-name)
+                                           (name kebab-case-name))
+                                          :as
+                                          camelCaseName)])]
               (assoc m camelCaseName datomic-field-name)))
           {} fields))
 
+;; FIXME might not need anymore
 (defn ^:private datomic->lacinia-map
   [fields]
   (reduce (fn [m {:keys [field/camelCaseName
@@ -179,6 +262,23 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(defn ^:private paginated-lookup?
+  [lacinia-type-name lacinia-field-name engine-conn]
+  (let [{:keys [:lacinia->datomic.field/lookup
+                :lacinia->datomic.field/reverse-lookup]}
+        (d/q `[:find (~'pull ~'?f [:lacinia->datomic.field/lookup
+                                   :lacinia->datomic.field/reverse-lookup]) ~'.
+               :where
+               [~'?t :lacinia/tag true]
+               [~'?f :lacinia/tag true]
+               [~'?t :type/PascalCaseName ~lacinia-type-name]
+               [~'?f :field/parent ?t]
+               [~'?f :field/camelCaseName ~lacinia-field-name]]
+             @engine-conn)]
+    (if (or lookup reverse-lookup)
+      true false)))
+
+
 (defn ^:private build-datomic-selector
   [field-selection engine-conn]
   (let [inner-selections (:selections field-selection)
@@ -190,14 +290,19 @@
       (fn [c selection]
         (let [lacinia-field-name (:field selection)
               datomic-fields (get lacinia->datomic lacinia-field-name)
-              selection-selections (:selections selection)]
+              selection-selections (:selections selection)
+              is-paginated? (paginated-lookup? type-name lacinia-field-name engine-conn)]
           (if datomic-fields
-            (if selection-selections
+            (if (and selection-selections
+                     (not is-paginated?))
               (conj c (assoc {} (first datomic-fields)
                              (build-datomic-selector selection engine-conn)))
-              (apply conj c datomic-fields)))))
+              (apply conj c datomic-fields))
+            c)))
       #{} inner-selections))))
 
+
+;; FIXME might not need anymore
 (defn ^:private reduce-lacinia-response
   [datomic-obj datomic->lacinia]
   (reduce-kv (fn [m k v] 
@@ -215,6 +320,7 @@
                    :else (assoc m lacinia-field-name v))))
              {} datomic-obj))
 
+;; FIXME might not need anymore
 (defn ^:private build-lacinia-response
   [datomic-obj engine-conn]
   (let [fields (query-datomic-fields engine-conn)
@@ -225,25 +331,26 @@
 
 (defn ^:private field->resolve-pull-entry
   [{:keys [field/camelCaseName field/parent param/_parent] :as field}]
-  (let [pull-param (first _parent)
-        arg-type (pull-param-type pull-param)]
-    {:resolve-type :pull
-     :field-name camelCaseName
-     :args (reduce
-            (fn [m param]
-              (assoc m (:param/camelCaseName param)
-                     {:type (pull-param-type param)
-                      :ident (case (pull-param-type param)
-                               :lookup (:lacinia->datomic.param/lookup param)
-                               :none)
-                      :transform (:lacinia->datomic.param/transform param)}))
-            {} _parent)
-     :arg-name (:param/camelCaseName pull-param)
-     :arg-type arg-type
-     :transform (:lacinia->datomic.param/transform pull-param)
-     :ident (if (= :lookup arg-type)
-              (:lacinia->datomic.param/lookup pull-param)
-              :none)}))
+  {:resolve-type :pull
+   :field-name camelCaseName
+   :args (reduce
+          (fn [m param]
+            (assoc m (:param/camelCaseName param)
+                   {:type (pull-param-type param)
+                    :ident (case (pull-param-type param)
+                             :lookup (:lacinia->datomic.param/lookup param)
+                             :none)
+                    :transform (:lacinia->datomic.param/transform param)}))
+          {} _parent)})
+
+(defn ^:private field->resolve-lookup-entry
+  [{:keys [field/camelCaseName field/parent
+           :lacinia->datomic.field/lookup
+           :lacinia->datomic.field/reverse-lookup] :as field}]
+  {:lacinia-type-name (:type/PascalCaseName parent)
+   :lacinia-field-name camelCaseName
+   :lookup lookup
+   :reverse-lookup reverse-lookup})
 
 (defn ^:private field->resolve-find-entry
   [{:keys [field/camelCaseName field/parent param/_parent] :as field}]
@@ -258,6 +365,7 @@
               (:lacinia->datomic.param/lookup pull-param)
               :none)}))
 
+;; FIXME might not be needed anymore
 (defn ^:private build-pull-eid
   [inboud-args engine-args]
   (reduce-kv (fn [a in-arg-name in-arg-val]
@@ -271,55 +379,111 @@
                               (= :lookup type) [ident arg-val])))))
              nil inboud-args))
 
+(defn ^:private build-single-eid
+  [inboud-args engine-args]
+  (reduce-kv (fn [a in-arg-name in-arg-val]
+               (let [{:keys [type ident transform]} (get engine-args in-arg-name)
+                     arg-val (if transform
+                               ((find-var transform) in-arg-val)
+                               in-arg-val)]
+                 (if type
+                   (reduced (cond
+                              (= :eid type) [['?e :db/id (Long/parseLong arg-val)]]
+                              (= :lookup type) [['?e ident arg-val]])))))
+             nil inboud-args))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(defn ^:private attach-pull-resolvers
+  [lacinia-schema pull-fields engine-conn]
+  (->> pull-fields
+       (reduce
+        (fn [m {:keys [resolve-type field-name
+                       arg-name arg-type ident transform] :as field-entry}]
+          (assoc-in m [:queries field-name :resolve]
+                    (fn [{:keys [db] :as ctx} args resolved-value]
+                      (let [field-selection (->> ctx
+                                                 extract-lacinia-selections
+                                                 (find-selection-by-field field-name))
+                            selector (build-datomic-selector field-selection engine-conn)
+                            where (build-single-eid args (:args field-entry))]
+                        (println "Resolving pull for args" args)
+                        (println "selector:")
+                        (clojure.pprint/pprint selector)
+                        (println "where:")
+                        (println where)
+                        (println "------")
+                        (clojure.pprint/pprint
+                         (fetch-one db selector '?e where))
+                        (-> (fetch-one db selector '?e where)
+                            (resolve/with-context {:where where}))))))
+        lacinia-schema)))
+
+(defn ^:private attach-lookup-resolvers
+  [lacinia-schema lookup-fields engine-conn]
+  (->> lookup-fields
+       (reduce
+        (fn [m {:keys [lacinia-type-name lacinia-field-name
+                       lookup reverse-lookup]}]
+          (assoc-in m [:objects lacinia-type-name :fields lacinia-field-name :resolve]
+                    (fn [{:keys [db where] :as ctx}
+                         {:keys [offset limit] :as args} resolved-value]
+                      (println "Lookup resolvers with offset" offset "and limit" limit)
+                      (println "Lacinia type/field names:" lacinia-type-name lacinia-field-name)
+                      (let [field-selection (->> ctx
+                                                 extract-lacinia-selections
+                                                 first
+                                                 :selections
+                                                 (find-selection-by-field lacinia-field-name)
+                                                 :selections
+                                                 (find-selection-by-field :nodes))
+                            selector (build-datomic-selector field-selection engine-conn)
+                            placeholder (cond
+                                          lookup
+                                          (->> lookup name (str "?") symbol)
+                                          reverse-lookup
+                                          (->> reverse-lookup name (str "?") symbol))
+                            this-where (cond
+                                         lookup
+                                         (concat where [['?e lookup placeholder]])
+                                         reverse-lookup
+                                         (concat where [[placeholder reverse-lookup '?e]]))]
+
+                        (println "lookup" lookup)
+                        (println "reverse-lookup" reverse-lookup)
+                        
+                        (println "selector:")
+                        (clojure.pprint/pprint selector)
+                        (println "placeholder:")
+                        (println placeholder)
+                        (println "where:")
+                        (println this-where)
+                        (println "------")
+
+                        (clojure.pprint/pprint
+                         (fetch-page db selector placeholder this-where
+                                     {:limit limit
+                                      :offset offset}))
+
+                        (fetch-page db selector placeholder this-where
+                                    {:limit limit
+                                     :offset offset})))))
+        lacinia-schema)))
+
 (defn attach-resolvers
-  [lacinia-schema engine-conn db-conn]
+  [lacinia-schema engine-conn]
   (let [pull-fields (->> engine-conn
                          query-resolve-pull-fields
                          (map field->resolve-pull-entry))
         find-fields (->> engine-conn
                          query-resolve-find-fields
-                         (map field->resolve-find-entry))]
-    (->> (concat pull-fields find-fields)
-         (reduce
-          (fn [m {:keys [resolve-type field-name
-                         arg-name arg-type ident transform] :as field-entry}]
-            (cond-> m
-              (= :pull resolve-type)
-              (assoc-in [:queries field-name :resolve]
-                        (fn [ctx args resolved-value]
-                          (let [field-selection (->> ctx
-                                                     extract-lacinia-selections
-                                                     (find-selection-by-field field-name))
-                                selector (build-datomic-selector field-selection engine-conn)
-                                eid (build-pull-eid args (:args field-entry))
-                                db (datomic/db db-conn)]
-                            (println "Resolving pull for args" args)
-                            (println "selector:")
-                            (clojure.pprint/pprint selector)
-                            (println "eid:")
-                            (println eid)
-                            (println "------")
-                            (-> db
-                                (datomic/pull selector eid)
-                                (build-lacinia-response engine-conn)))))
-
-              (= :find resolve-type)
-              (assoc-in [:queries field-name :resolve]
-                        (fn [ctx args resolved-value]
-                          #_(let [field-selections (->> ctx
-                                                        extract-lacinia-selections
-                                                        (find-selection-by-field field-name))
-                                  selector (build-datomic-selector field-selections engine-conn)
-                                  arg-val (get args arg-name)]
-                              ;;FIXME this is where it should connect to db-conn
-                              (println {:selector selector
-                                        :eid (cond
-                                               (= :eid arg-type) arg-val
-                                               (= :lookup arg-type) [ident arg-val])})))))
-            )
-          lacinia-schema))))
+                         (map field->resolve-find-entry))
+        lookup-fields (->> engine-conn
+                           query-resolve-lookup-fields
+                           (map field->resolve-lookup-entry))]
+    (-> lacinia-schema
+        (attach-pull-resolvers pull-fields engine-conn)
+        (attach-lookup-resolvers lookup-fields engine-conn))))
 
 (defn transform-email
   [v]
@@ -327,35 +491,45 @@
   v)
 
 (def s
-  '[^{:datomic/tag-recursive {:except [id full-name reportees offset limit]}
-      :lacinia/tag-recursive true}
+  '[^{:lacinia/tag true}
     Employee
     [^{:type ID
+       :lacinia/tag true
        :lacinia->datomic.field/dbid true}
      id
      
      ^{:type String
+       :lacinia/tag true
+       :datomic/tag true 
        :datomic/unique :db.unique/identity}
      email
 
-     ^String
+     ^{:type String
+       :lacinia/tag true
+       :datomic/tag true}
      first-name
 
-     ^String
+     ^{:type String
+       :lacinia/tag true
+       :datomic/tag true}
      last-name
 
      ^{:type String
+       :lacinia/tag true
        :lacinia/resolve :employee/full-name-resolver
        :lacinia->datomic.field/depends-on [:employee/first-name
                                            :employee/last-name]}
      full-name
      
      ^{:type Employee
-       :optional true}
+       :optional true
+       :datomic/tag true
+       :lacinia/tag true}
      supervisor
 
      ^{:type EmployeeList
-       :lacinia->datomic.field/reverse-lookup :employee/_supervisor}
+       :lacinia/tag-recursive true
+       :lacinia->datomic.field/reverse-lookup :employee/supervisor}
      reportees
      [^{:type Integer
         :optional true
@@ -368,9 +542,27 @@
         :lacinia->datomic.param/limit true}
       limit]
      
+     ^{:type ProjectList
+       :lacinia/tag-recursive true
+       :lacinia->datomic.field/lookup :employee/projects}
+     projects
+     [^{:type Integer
+        :optional true
+        :default 0 
+        :lacinia->datomic.param/offset true}
+      offset
+      ^{:type Integer
+        :optional true
+        :default 50
+        :lacinia->datomic.param/limit true}
+      limit]
+
      ^{:type Project
-       :cardinality [0 n]}
-     projects]
+       :cardinality [0 n]
+       :datomic/tag true}
+     projects
+
+     ^String blablabla]
 
     ^{:datomic/tag-recursive true
       :lacinia/tag-recursive true}
@@ -392,6 +584,7 @@
      page-info
 
      ^{:type Project
+       :optional true
        :cardinality [0 n]}
      nodes]
 
@@ -449,21 +642,29 @@
         :lacinia->datomic.param/eid true}
       id]
 
-     ^{:type EmployeeList
-       :lacinia->datomic.query/type :find}
+     #_^{:type EmployeeList
+         :lacinia->datomic.query/type :find}
      employees
-     [^{:type Integer
-        :optional true
-        :default 0 
-        :lacinia->datomic.param/offset true}
-      offset
-      ^{:type Integer
-        :optional true
-        :default 50
-        :lacinia->datomic.param/limit true}
-      limit]]])
+     #_[^{:type Integer
+          :optional true
+          :default 0 
+          :lacinia->datomic.param/offset true}
+        offset
+        ^{:type Integer
+          :optional true
+          :default 50
+          :lacinia->datomic.param/limit true}
+        limit]]])
 
 (def conn (engine/init-schema s))
+
+(d/q '[:find (pull ?f [:field/name
+                       :lacinia/tag])
+       :where
+       [?t :type/name "Employee"]
+       [?f :field/parent ?t]
+       [?f :field/name "projects"]]
+     @conn)
 
 (def lacinia-schema (hls/schema conn))
 
@@ -520,11 +721,13 @@
                                       :employee/last-name "Fernandes"
                                       :employee/supervisor [:employee/email "tl@work.co"]}]})
 
-(def compiled-schema (-> lacinia-schema
+(def prepared-schema (-> lacinia-schema
                          (l-util/attach-resolvers
                           {:bla bla
                            :employee/full-name-resolver full-name-resolver})
-                         (attach-resolvers conn db-conn)
+                         (attach-resolvers conn)))
+
+(def compiled-schema (-> prepared-schema
                          l-schema/compile))
 
 
@@ -559,10 +762,14 @@
    nil nil)
 
 
+#_ (lacinia/execute
+    compiled-schema
+    "{ employee (email: \"tl@work.co\") { id fullName supervisor { fullName } projects { totalCount nodes { name } } reportees { totalCount nodes { fullName } } } }"
+    nil {:db (datomic/db db-conn)})
+
 (lacinia/execute
  compiled-schema
- "{ employee (email: \"tl@work.co\") { id fullName supervisor { fullName } reportees { firstName fullName } } }"
- nil nil)
+ "{ employee (email: \"tl@work.co\") { id fullName reportees (limit: 20) { totalCount pageInfo { totalPages } nodes { id fullName } } } }" nil {:db (datomic/db db-conn)})
 
 #_(lacinia/execute
    compiled-schema
@@ -599,83 +806,59 @@
    (datomic/db db-conn))
 
 
-(datomic/q
- '[:find ?e (count ?r)
-   :where
-   [?e :employee/email "tl@work.co"]
-   [?r :employee/supervisor ?e]]
- (datomic/db db-conn))
+(comment (datomic/q
+          '[:find ?e (count ?r)
+            :where
+            [?e :employee/email "tl@work.co"]
+            [?r :employee/supervisor ?e]]
+          (datomic/db db-conn))
 
 
-(datomic/q
- '[:find ?e
-   :where
-   [?e :employee/email "zeh@work.co"]]
- (datomic/db db-conn))
+         (datomic/q
+          '[:find ?e
+            :where
+            [?e :employee/email "zeh@work.co"]]
+          (datomic/db db-conn))
 
-(def all-eids
-  (flatten
-   (datomic/q
-    {:query '[:find ?e
-              :where
-              [?e :employee/first-name]]
-     :args [(datomic/db db-conn)]
-     :limit 2
-     :offset 1})))
+         (def all-eids
+           (flatten
+            (datomic/q
+             {:query '[:find ?e
+                       :where
+                       [?e :employee/first-name]]
+              :args [(datomic/db db-conn)]
+              :limit 2
+              :offset 1})))
 
-(defn pull-many
-  [db selector eids]
-  (map #(datomic/pull db selector %)
-       eids))
 
-(defn fetch-page
-  ([db selector where]
-   (fetch-list db selector where nil))
-  ([db selector where {:keys [offset limit] :or {offset 0 limit -1}}]
-   (let [eids
-         (-> (datomic/q {:query (concat '[:find ?e :where] where)
-                         :args [db]
-                         :limit limit
-                         :offset offset})
-             flatten)
-         total-count
-         (-> (datomic/q {:query (concat '[:find (count ?e) :where] where)
-                         :args [db]})
-             flatten
-             first)
-         has-prev (>= (- offset limit) 0)
-         has-next (<= (+ offset limit) total-count)]
-     {:total-count total-count
-      :page-info {:total-pages (int (Math/ceil (/ total-count limit)))
-                  :current-page (int (Math/ceil (/ offset limit)))
-                  :page-size limit
-                  :current-offset offset
-                  :has-prev has-prev
-                  :prev-offset (if has-prev (- offset limit) 0)
-                  :has-next has-next
-                  :next-offset (if has-next (+ offset limit) offset)}
-      :nodes (pull-many db selector eids)})))
+         ;; find tiago
+         (fetch-one (datomic/db db-conn)
+                    '[(:employee/first-name :as :firstName)]
+                    '?e
+                    [['?e :employee/email "tl@work.co"]])
 
-(->> (fetch-page (datomic/db db-conn)
-                 '[:employee/first-name]
-                 [['?e :employee/first-name]]
-                 {:limit 2
-                  :offset 4}))
+         ;; paginate tiago's reportees
+         (fetch-page (datomic/db db-conn)
+                     '[:employee/first-name]
+                     '?e
+                     [['?s :employee/email "tl@work.co"]
+                      ['?e :employee/supervisor '?s]]
+                     {:limit 2})
 
-(datomic/q
- '[:find (count ?e)
-   :where
-   [?e :employee/first-name]]
- (datomic/db db-conn))
+         (datomic/q
+          '[:find (count ?e)
+            :where
+            [?e :employee/first-name]]
+          (datomic/db db-conn))
 
 
 
 
 
-(pull-many (datomic/db db-conn)
-           '[:employee/first-name]
-           [42630264832131144 37418579716472906])
+         (pull-many (datomic/db db-conn)
+                    '[:employee/first-name]
+                    [42630264832131144 37418579716472906])
 
-(pull-many (datomic/db db-conn)
-           '[:employee/first-name]
-           all-eids)
+         (pull-many (datomic/db db-conn)
+                    '[:employee/first-name]
+                    all-eids))
