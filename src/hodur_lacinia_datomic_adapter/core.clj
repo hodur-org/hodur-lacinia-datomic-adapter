@@ -301,32 +301,6 @@
             c)))
       #{} inner-selections))))
 
-
-;; FIXME might not need anymore
-(defn ^:private reduce-lacinia-response
-  [datomic-obj datomic->lacinia]
-  (reduce-kv (fn [m k v] 
-               (let [lacinia-field-name (get datomic->lacinia k)]
-                 (cond
-                   (map? v)
-                   (assoc m lacinia-field-name
-                          (reduce-lacinia-response v datomic->lacinia))
-
-                   (vector? v)
-                   (assoc m lacinia-field-name
-                          (map #(reduce-lacinia-response % datomic->lacinia)
-                               v))
-
-                   :else (assoc m lacinia-field-name v))))
-             {} datomic-obj))
-
-;; FIXME might not need anymore
-(defn ^:private build-lacinia-response
-  [datomic-obj engine-conn]
-  (let [fields (query-datomic-fields engine-conn)
-        datomic->lacinia (datomic->lacinia-map fields)]
-    (reduce-lacinia-response datomic-obj datomic->lacinia)))
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn ^:private field->resolve-pull-entry
@@ -365,19 +339,7 @@
               (:lacinia->datomic.param/lookup pull-param)
               :none)}))
 
-;; FIXME might not be needed anymore
-(defn ^:private build-pull-eid
-  [inboud-args engine-args]
-  (reduce-kv (fn [a in-arg-name in-arg-val]
-               (let [{:keys [type ident transform]} (get engine-args in-arg-name)
-                     arg-val (if transform
-                               ((find-var transform) in-arg-val)
-                               in-arg-val)]
-                 (if type
-                   (reduced (cond
-                              (= :eid type) (Long/parseLong arg-val)
-                              (= :lookup type) [ident arg-val])))))
-             nil inboud-args))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn ^:private build-single-eid
   [inboud-args engine-args]
@@ -394,6 +356,12 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(defn ^:private get-field-selection-for-pull-resolver
+  [ctx lacinia-field-name]
+  (->> ctx
+       extract-lacinia-selections
+       (find-selection-by-field lacinia-field-name)))
+
 (defn ^:private attach-pull-resolvers
   [lacinia-schema pull-fields engine-conn]
   (->> pull-fields
@@ -402,22 +370,44 @@
                        arg-name arg-type ident transform] :as field-entry}]
           (assoc-in m [:queries field-name :resolve]
                     (fn [{:keys [db] :as ctx} args resolved-value]
-                      (let [field-selection (->> ctx
-                                                 extract-lacinia-selections
-                                                 (find-selection-by-field field-name))
+                      (println "=> Pull Resolver for query:" field-name)
+                      (println "... args:" args)
+                      (let [field-selection (get-field-selection-for-pull-resolver
+                                             ctx field-name)
                             selector (build-datomic-selector field-selection engine-conn)
                             where (build-single-eid args (:args field-entry))]
-                        (println "Resolving pull for args" args)
-                        (println "selector:")
+                        (println "... selector:")
                         (clojure.pprint/pprint selector)
-                        (println "where:")
-                        (println where)
-                        (println "------")
-                        (clojure.pprint/pprint
-                         (fetch-one db selector '?e where))
+                        (println "... where:")
+                        (clojure.pprint/pprint where)
+                        #_(println "------")
+                        #_(clojure.pprint/pprint
+                           (fetch-one db selector '?e where))
                         (-> (fetch-one db selector '?e where)
                             (resolve/with-context {:where where}))))))
         lacinia-schema)))
+
+(defn ^:private get-field-selection-for-lookup-resolver
+  [ctx lacinia-field-name]
+  (->> ctx
+       extract-lacinia-selections
+       first
+       :selections
+       (find-selection-by-field lacinia-field-name)
+       :selections
+       (find-selection-by-field :nodes)))
+
+(defn ^:private get-lookup-placeholder
+  [lookup reverse-lookup]
+  (cond
+    lookup         (->> lookup name (str "?") symbol)
+    reverse-lookup (->> reverse-lookup name (str "?") symbol)))
+
+(defn ^:privat get-lookup-where
+  [prev-where placeholder lookup reverse-lookup]
+  (cond
+    lookup         (concat prev-where [['?e lookup placeholder]])
+    reverse-lookup (concat prev-where [[placeholder reverse-lookup '?e]])))
 
 (defn ^:private attach-lookup-resolvers
   [lacinia-schema lookup-fields engine-conn]
@@ -428,46 +418,29 @@
           (assoc-in m [:objects lacinia-type-name :fields lacinia-field-name :resolve]
                     (fn [{:keys [db where] :as ctx}
                          {:keys [offset limit] :as args} resolved-value]
-                      (println "Lookup resolvers with offset" offset "and limit" limit)
-                      (println "Lacinia type/field names:" lacinia-type-name lacinia-field-name)
-                      (let [field-selection (->> ctx
-                                                 extract-lacinia-selections
-                                                 first
-                                                 :selections
-                                                 (find-selection-by-field lacinia-field-name)
-                                                 :selections
-                                                 (find-selection-by-field :nodes))
+                      (println "=> Lookup resolver for" lacinia-type-name lacinia-field-name)
+                      (println "... offset:" offset "limit:" limit)
+                      (let [field-selection (get-field-selection-for-lookup-resolver
+                                             ctx lacinia-field-name)
                             selector (build-datomic-selector field-selection engine-conn)
-                            placeholder (cond
-                                          lookup
-                                          (->> lookup name (str "?") symbol)
-                                          reverse-lookup
-                                          (->> reverse-lookup name (str "?") symbol))
-                            this-where (cond
-                                         lookup
-                                         (concat where [['?e lookup placeholder]])
-                                         reverse-lookup
-                                         (concat where [[placeholder reverse-lookup '?e]]))]
-
-                        (println "lookup" lookup)
-                        (println "reverse-lookup" reverse-lookup)
-                        
-                        (println "selector:")
+                            placeholder (get-lookup-placeholder lookup reverse-lookup)
+                            this-where (get-lookup-where where placeholder
+                                                         lookup reverse-lookup)]
+                        (println "... selector:")
                         (clojure.pprint/pprint selector)
-                        (println "placeholder:")
+                        (println "... placeholder:")
                         (println placeholder)
-                        (println "where:")
+                        (println "... where:")
                         (println this-where)
-                        (println "------")
-
-                        (clojure.pprint/pprint
-                         (fetch-page db selector placeholder this-where
-                                     {:limit limit
-                                      :offset offset}))
-
-                        (fetch-page db selector placeholder this-where
-                                    {:limit limit
-                                     :offset offset})))))
+                        #_(println "------")
+                        #_(clojure.pprint/pprint
+                           (fetch-page db selector placeholder this-where
+                                       {:limit limit
+                                        :offset offset}))
+                        (-> (fetch-page db selector placeholder this-where
+                                        {:limit limit
+                                         :offset offset})
+                            (resolve/with-context {:where this-where}))))))
         lacinia-schema)))
 
 (defn attach-resolvers
