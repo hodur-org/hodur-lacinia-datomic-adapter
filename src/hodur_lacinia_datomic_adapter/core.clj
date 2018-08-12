@@ -463,8 +463,9 @@
   (println v)
   v)
 
-(def s
-  '[^{:lacinia/tag true}
+(def hodur-shared-schema
+  '[^{:lacinia/tag true
+      :datomic/tag true}
     Employee
     [^{:type ID
        :lacinia/tag true
@@ -533,22 +534,35 @@
      ^{:type Project
        :cardinality [0 n]
        :datomic/tag true}
-     projects
+     projects]
 
-     ^String blablabla]
-
-    ^{:datomic/tag-recursive true
-      :lacinia/tag-recursive true}
+    ^{:datomic/tag true
+      :lacinia/tag true}
     Project
-    [^String name]
+    [^{:type ID
+       :lacinia/tag true
+       :lacinia->datomic.field/dbid true}
+     id
+
+     ^{:type String
+       :lacinia/tag true
+       :datomic/tag true}
+     name
+
+     ^{:type String
+       :lacinia/tag true
+       :datomic/tag true}
+     description
+     ]
 
     ^{:datomic/tag-recursive true
       :lacinia/tag-recursive true
       :enum true}
     EmploymentType
-    [FULL_TIME PART_TIME]
+    [FULL_TIME PART_TIME]])
 
-    ^{:lacinia/tag-recursive true}
+(def hodur-lacinia-pagination-schema
+  '[^{:lacinia/tag-recursive true}
     ProjectList
     [^Integer
      total-count
@@ -597,9 +611,10 @@
      has-prev
      
      ^{:type Integer}
-     prev-offset]
-    
-    ^{:lacinia/tag-recursive true
+     prev-offset]])
+
+(def hodur-lacinia-query-schema
+  '[^{:lacinia/tag-recursive true
       :lacinia/query true}
     QueryRoot
     [^{:type Employee
@@ -615,46 +630,177 @@
         :lacinia->datomic.param/eid true}
       id]
 
-     #_^{:type EmployeeList
-         :lacinia->datomic.query/type :find}
+     ^{:type EmployeeList 
+       :lacinia->datomic.query/type :find
+       :lacinia/resolve :project/upsert}
      employees
-     #_[^{:type Integer
-          :optional true
-          :default 0 
-          :lacinia->datomic.param/offset true}
-        offset
-        ^{:type Integer
-          :optional true
-          :default 50
-          :lacinia->datomic.param/limit true}
-        limit]]])
+     [^{:type String
+        :optional true
+        :default ""
+        :lacinia->datomic.param/where-builder build-employee-name-search-where}
+      name-search
+      ^{:type Integer
+        :optional true
+        :default 0 
+        :lacinia->datomic.param/offset true}
+      offset
+      ^{:type Integer
+        :optional true
+        :default 50
+        :lacinia->datomic.param/limit true}
+      limit]]])
 
-(def conn (engine/init-schema s))
+(def hodur-lacinia-mutation-schema
+  '[^{:lacinia/tag-recursive true
+      :lacinia/input true
+      :lacinia->datomic.input/map-to Employee}
+    UpsertEmployeeInput
+    [^String email
+     ^String first-name
+     ^String last-name]
 
-(d/q '[:find (pull ?f [:field/name
-                       :lacinia/tag])
-       :where
-       [?t :type/name "Employee"]
-       [?f :field/parent ?t]
-       [?f :field/name "projects"]]
-     @conn)
+    ^{:lacinia/tag-recursive true
+      :lacinia/input true
+      :lacinia->datomic.input/map-to Project}
+    UpsertProjectInput
+    [^String name
+     ^String description]
+
+    ^{:lacinia/tag-recursive true
+      :lacinia/input true}
+    AddProjectToEmployeeInput
+    [^{:type ID
+       :lacinia->datomic.input/attach-from Project
+       :lacinia->datomic.input/dbid true}
+     project-id
+     ^UpsertEmployeeInput employee]
+
+    ^{:lacinia/tag-recursive true
+      :lacinia/input true}
+    AddEmployeeToProjectInput
+    [^{:type ID
+       :lacinia->datomic.input/attach-from Project
+       :lacinia->datomic.input/dbid true}
+     employee-id
+     ^UpsertProjectInput project]
+    
+    ^{:lacinia/tag-recursive true
+      :lacinia/input true}
+    AttachProjectToEmployeeInput
+    [^{:type ID
+       :lacinia->datomic.input/attach-from Project
+       :lacinia->datomic.input/dbid true}
+     project-id
+     ^{:type ID
+       :lacinia->datomic.input/attach-from Employee
+       :lacinia->datomic.input/dbid true}
+     employee-id]
+
+    ^{:lacinia/tag-recursive true
+      :lacinia/input true}
+    AttachEmployeeToSupervisorInput
+    [^{:type ID
+       :lacinia->datomic.input/attach-from Employee
+       :lacinia->datomic.input/dbid true}
+     employee-id
+     ^{:type ID
+       :lacinia->datomic.input/attach-from Employee
+       :lacinia->datomic.input/dbid true}
+     supervisor-id]
+
+    ^{:lacinia/tag-recursive true
+      :lacinia/input true}
+    DeleteProjectInput
+    [^{:type ID
+       :lacinia->datomic.input/delete-from Project
+       :lacinia->datomic.input/dbid true}
+     project-id]
+
+    ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+    
+    ^{:lacinia/tag-recursive true
+      :lacinia/mutation true}
+    MutationRoot
+    [^{:type Employee
+       :lacinia->datomic.mutation/type :upsert
+       :lacinia/resolve :project/upsert}
+     upsert-employee
+     [^UpsertEmployeeInput input]
+
+     ^{:type Project
+       :lacinia->datomic.mutation/type :upsert
+       :lacinia/resolve :project/upsert}
+     upsert-project
+     [^UpsertProjectInput input]
+
+     ^{:type Employee
+       :lacinia->datomic.mutation/type :add-to
+       :lacinia/resolve :project/upsert}
+     add-project-to-employee
+     [^AddProjectToEmployeeInput input]
+
+     ^{:type Project
+       :lacinia->datomic.mutation/type :add-to
+       :lacinia/resolve :project/upsert}
+     add-user-to-project
+     [^AddEmployeeToProjectInput input]
+
+     ^{:type Employee
+       :lacinia->datomic.mutation/type :attach-to
+       :lacinia/resolve :project/upsert}
+     attach-project-to-employee
+     [^AttachProjectToEmployeeInput input]
+
+     ^{:type Employee
+       :lacinia->datomic.mutation/type :attach-to
+       :lacinia/resolve :project/upsert}
+     attach-employee-to-supervisor
+     [^AttachEmployeeToSupervisorInput input]
+
+     ^{:type ID
+       :lacinia->datomic.mutation/type :delete
+       :lacinia/resolve :project/upsert}
+     delete-project
+     [^DeleteProjectInput input]]])
+
+(def conn (engine/init-schema hodur-shared-schema
+                              hodur-lacinia-query-schema
+                              hodur-lacinia-mutation-schema
+                              hodur-lacinia-pagination-schema))
+
+#_(d/q '[:find (pull ?f [:field/name
+                         :lacinia/tag])
+         :where
+         [?t :type/name "Employee"]
+         [?f :field/parent ?t]
+         [?f :field/name "projects"]]
+       @conn)
 
 (def lacinia-schema (hls/schema conn))
 
 (def datomic-schema (hds/schema conn))
 
 
-(defn bla [context args resolved-value]
-  #_(println "root" context args resolved-value)
-  {:firstName "Fabiana"
-   :lastName "Luchini"})
 
-(defn full-name-resolver [context args {:keys [:firstName :lastName] :as resolved-value}]
+(defn full-name-resolver
+  [context args {:keys [:firstName :lastName] :as resolved-value}]
   #_(println "field level" context args resolved-value)
   #_(clojure.pprint/pprint context)
   (str firstName " " lastName))
 
-#_(attach-resolvers lacinia-schema conn nil)
+(defn project-upsert
+  [{:keys [db-conn] :as ctx} {:keys [input] :as args} resolved-value]
+  (println "AQUII!!!")
+  (println input)
+  (let [tx-result (datomic/transact db-conn {:tx-data [{:project/name (:name input)
+                                                        :project/description (:description input)}]})
+        db-after (:db-after tx-result)
+        tx-data (:tx-data tx-result)
+        datom (last tx-data)
+        eid (:e datom)
+        pulled (datomic/pull db-after '[*] eid)]
+    (clojure.pprint/pprint pulled)))
+
 
 (def cfg {:server-type :ion
           :region "us-east-2"
@@ -696,8 +842,8 @@
 
 (def prepared-schema (-> lacinia-schema
                          (l-util/attach-resolvers
-                          {:bla bla
-                           :employee/full-name-resolver full-name-resolver})
+                          {:employee/full-name-resolver full-name-resolver
+                           :project/upsert project-upsert})
                          (attach-resolvers conn)))
 
 (def compiled-schema (-> prepared-schema
@@ -740,9 +886,13 @@
     "{ employee (email: \"tl@work.co\") { id fullName supervisor { fullName } projects { totalCount nodes { name } } reportees { totalCount nodes { fullName } } } }"
     nil {:db (datomic/db db-conn)})
 
+#_(lacinia/execute
+   compiled-schema
+   "{ employee (email: \"tl@work.co\") { id fullName reportees (limit: 20) { totalCount pageInfo { totalPages } nodes { id fullName } } } }" nil {:db (datomic/db db-conn)})
+
 (lacinia/execute
  compiled-schema
- "{ employee (email: \"tl@work.co\") { id fullName reportees (limit: 20) { totalCount pageInfo { totalPages } nodes { id fullName } } } }" nil {:db (datomic/db db-conn)})
+ "mutation { upsertProject (input: { name: \"Project X\" description: \"Mega project!!!!\"}) { id name } }" nil {:db-conn db-conn :db (datomic/db db-conn)})
 
 #_(lacinia/execute
    compiled-schema
@@ -750,6 +900,12 @@
     B:employee (email: \"zeh@work.co\") { id fullName firstName supervisor { fullName } }}"
    nil nil
    )
+
+(datomic/q
+ '[:find (pull ?p [*])
+   :where
+   [?p :project/name]]
+ (datomic/db db-conn))
 
 
 #_(clojure.pprint/pprint
