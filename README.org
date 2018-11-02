@@ -1,10 +1,13 @@
-#+TITLE:   Hodur Lacinia Schema
+#+TITLE:   Hodur Lacinia<->Datomic Adapter
 #+AUTHOR:  Tiago Luchini
 #+EMAIL:   info@tiagoluchini.eu
 #+OPTIONS: toc:t
 
-TBD: fix this token
+TBD: fix this badge ->
 [[https://circleci.com/gh/luchiniatwork/hodur-lacinia-schema.svg?style=shield&circle-token=]]
+[[https://img.shields.io/clojars/v/hodur/engine.svg]]
+[[https://img.shields.io/clojars/v/hodur/lacinia-datomic-adapter.svg]]
+[[https://img.shields.io/badge/License-MIT-blue.svg]]
 
 Hodur is a descriptive domain modeling approach and related collection
 of libraries for Clojure.
@@ -29,19 +32,21 @@ functional manner.
   Therefore, refer the [[https://github.com/luchiniatwork/hodur-engine#getting-started][Hodur Engine's Getting Started]] first and then
   return here for Lacinia-specific setup.
 
-  After having set up ~hodur-engine~ as described above, we are also
-  need to add ~hodur-lacinia-schema~, a plugin that creates Lacinia
-  Schemas out of your model to the ~deps.edn~ file:
+  After having set up ~hodur-engine~ as described above, we also need
+  to add ~hodur/lacinia-schema~, ~hodur/datomic-schema~, and
+  ~hodur/lacinia-datomic-adapter~ individually to the ~deps.edn~ file:
 
 #+BEGIN_SRC clojure
-  {:deps {:hodur/engine         {:mvn/version "0.1.0"}
-          :hodur/lacinia-schema {:mvn/version "0.1.0"}}}
+  {:deps {:hodur/engine                  {:mvn/version "0.1.2"}
+          :hodur/lacinia-schema          {:mvn/version "0.1.0"}
+          :hodur/datomic-schema          {:mvn/version "0.1.0"}
+          :hodur/lacinia-datomic-adapter {:mvn/version "0.1.0"}}}
 #+END_SRC
 
   You should ~require~ it any way you see fit:
 
 #+BEGIN_SRC clojure
-  (require '[hodur-lacinia-schema.core :as hodur-lacinia])
+  (require '[hodur/lacinia-schema.core :as hodur-lacinia])
 #+END_SRC
 
   Let's expand our ~Person~ model from the original getting started by
@@ -96,26 +101,66 @@ functional manner.
                            schema/compile))
 #+END_SRC
 
-* Properly tagging with lacinia and/or datomic
+* Model Definition
 
-TBD: what does it mean in practice
+  All Hodur plugins follow the [[https://github.com/luchiniatwork/hodur-engine#model-definition][Model Definition]] as described on Hodur
+  [[https://github.com/luchiniatwork/hodur-engine#model-definition][Engine's documentation]].
 
+* Setting up Queries
 
-* Querying
+** Querying one entity
 
-** Querying one
+   In many cases you want simply to have a GraphQL query that returns
+   a specific instance of an entity.
 
-~:lacinia->datomic.query/type :one~
+   For these cases, make sure your Lacinia query field is marked with
+   ~:lacinia/query~ plus ~:lacinia->datomic.query/type :one~. Both the
+   query field and the entity returned must be tagged for lacinia and
+   datomic.
 
-- must be in a field in a ~lacinia/query~
-- both entity and field must be lacinia tagged
-- will look for params:
-  - ~:lacinia->datomic.param/lookup-ref~ (for ~[?e :employee/email
-    "tl@work.co"]~ kind of cases)
-  - (only the first one found)
-- will send passed argument to ~:lacinia->datomic.param/transform~
+   The adapter will look for params in the field marked with
+   ~:lacinia->datomic.param/lookup-ref~. Each of these params must
+   point to a Datomic lookup ref that will be used to located this
+   entity.
 
-** Querying many
+   In the following example, we are specifying that param ~email~ will
+   cause the adapter to search for an employee that has the attribute
+   ~:employee/email~ set to the value of the parameter, therefore
+   fetching it.
+
+#+BEGIN_SRC clojure
+  [QueryRoot
+   [^{:type Employee
+      :lacinia->datomic.query/type :one}
+    employee
+    [^{:type String
+       :optional true
+       :lacinia->datomic.param/lookup-ref :employee/email}
+     email]]
+#+END_SRC
+
+   It's important to mention that, in order for this to work on
+   Datomic, the attribute ~:employee/email~ must be marked as
+   identity. Example:
+
+#+BEGIN_SRC clojure
+  [Employee
+   [^{:type String
+      :datomic/unique :db.unique/identity}
+    email
+    
+    ^{:type String}
+    first-name]]
+#+END_SRC
+
+   If you have any sort of treatment you want to do on the parameters
+   before sending them to Datomic, you can specify
+   ~:lacinia->datomic.param/transform~ on the param. This marker
+   points to a fully qualified symbol that is expected to be resolved
+   to your desired function.
+
+** Querying many entities
+TBD
 
 ~:lacinia->datomic.query/type :many~
 
@@ -172,6 +217,7 @@ TBD: what does it mean in practice
 
 :lacinia->datomic.param/filter-builder user/new-build-employee-name-search-where
 
+
 ** Lookups
 
 - one to one are simple lookups
@@ -185,11 +231,14 @@ TBD: what does it mean in practice
 
 ~:lacinia->datomic.field/reverse-lookup-many~ formerly called reverse-lookup
 
+TBD
+
 ** Custom Resolvers
 
 - TBD: should we have a final "resolver" like function with the
   prepped payload before returning the response???
 
+TBD
 
 ** Special case
 
@@ -201,8 +250,9 @@ TBD: what does it mean in practice
  
 
 
+TBD
 
-* Inputs/Mutations (TBD)
+* Setting up Mutations
 
 
 
@@ -224,6 +274,10 @@ TBD: what does it mean in practice
 :lacinia->datomic.mutation/type :attach-to TBD> try to remove
 
 :lacinia->datomic.mutation/type :delete TBD> keep
+
+* Trobleshooting
+
+TBD: what does it mean in practice
 
 * Bugs
 
