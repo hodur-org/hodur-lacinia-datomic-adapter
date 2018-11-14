@@ -59,14 +59,14 @@
      (println "=========")
      (println "=> Off to Datomic (count query):")
      (clojure.pprint/pprint datomic-count)
-     (let [eids        (-> datomic-full datomic/q flatten)
+     (let [eids        (-> datomic-full datomic/q vec flatten)
            total-count (or (-> (datomic/q datomic-count)
+                               vec
                                flatten
                                first)
                            0)
            has-prev    (>= (- offset limit) 0)
            has-next    (<= (+ offset limit) total-count)]
-       (println eids)
        {:totalCount total-count
         :pageInfo   {:totalPages (int (Math/ceil (/ total-count limit)))
                      :currentPage (int (Math/ceil (/ offset limit)))
@@ -89,7 +89,7 @@
     (println "=========")
     (println "=> Off to Datomic (full query):")
     (clojure.pprint/pprint datomic)
-    (let [eid (-> datomic datomic/q flatten first)]
+    (let [eid (-> datomic datomic/q vec flatten first)]
       (datomic/pull db selector eid))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
