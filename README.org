@@ -255,6 +255,46 @@ TBD
 * Setting up Mutations
 
 
+Notes:
+
+For creating payload:
+
+- ~map-to~ might be ok - it's a way to limit the input and still
+  indicate what to parse to
+- a limitation here is that fields MUST be exactly the same
+- alternative here would be to have a a keyword mapper... for
+  instance, ~EmployeeInput~ would have a map-to ~:employee~
+- it feels similar :point-up:
+
+Entity Identification:
+
+- we need a kind of ~lookup-ref~ to help find the entity on an upsert
+  scenario
+- it would have to be something like ~email~ -> ~:employee/email~
+- consider whether we could have a automatic ~uuid~ generator too
+- or maybe a kind of "transformer" that gets called with the args so
+  that users can extend it (as in, creating a random uuid if one is
+  not offered)
+
+Deletion:
+
+- :db/retractEntity needs to be considered for sure (it seems to
+  smartly trickle to attributes, refs, and components)
+- ~[:db/retractEntity [:person/email "jdoe@example.com"]]~
+- :db/retract needs to specify Op E A V
+- if you specify a V that does not exist, the transaction gets through
+  but does not change anything
+
+
+Field marked as /retract-entity and email marked as lookup-ref
+~retractPerson (email: "bla")~
+
+Field marked as /retract, email as lookup-ref, and projectuuid as /target-ref?
+~retractProjectFromPerson (email: "bla", projectUuid: "xxx")~
+
+Field marked as /retract, email as lookup-ref, and factInput as /retract-map?
+~retractFactsFromPerson (email: "bla", factInput: {likes: "pizza"})
+
 
 :lacinia->datomic.input/map-to Employee
 
@@ -274,7 +314,6 @@ TBD
 :lacinia->datomic.mutation/type :attach-to TBD> try to remove
 
 :lacinia->datomic.mutation/type :delete TBD> keep
-
 * Trobleshooting
 
 TBD: what does it mean in practice
