@@ -8,6 +8,30 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(defn ^:private anom-map
+  [category msg]
+  {:hodur-lacinia-datomic/category (keyword "hodur-lacinia-datomic" (name category))
+   :hodur-lacinia-datomic/message msg})
+
+(defn ^:private anomaly!
+  ([name msg]
+   (throw (ex-info msg (anom-map name msg))))
+  ([name msg cause]
+   (throw (ex-info msg (anom-map name msg) cause))))
+
+(defn ^:private require-resolve
+  [sym]
+  (try
+    (require (symbol (namespace sym)))
+    (let [the-var (resolve sym)]
+      (if the-var
+        the-var
+        (anomaly! :not-found (str "Could not resolve " sym))))
+    (catch Exception e
+      (anomaly! :not-found (str "Could not require " (namespace sym) " for " sym)))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 (defn ^:private pull-many
   [db selector eids]
   (map #(datomic/pull db selector %)
@@ -285,7 +309,7 @@
    :args (reduce
           (fn [m param]
             (if-let [filter-builder-sym (:lacinia->datomic.param/filter-builder param)]
-              (let [builder-fn (find-var filter-builder-sym)]
+              (let [builder-fn (require-resolve filter-builder-sym)]
                 (assoc m (:param/camelCaseName param)
                        {:filter-builder-fn builder-fn}))
               m))
@@ -390,7 +414,7 @@
   (reduce-kv (fn [a in-arg-name in-arg-val]
                (let [{:keys [lookup-ref transform]} (get-in field-entry [:args in-arg-name])
                      arg-val  (if transform
-                                ((find-var transform) in-arg-val)
+                                ((require-resolve transform) in-arg-val)
                                 in-arg-val)
                      arg-name (->> in-arg-name
                                    ->kebab-case-string
