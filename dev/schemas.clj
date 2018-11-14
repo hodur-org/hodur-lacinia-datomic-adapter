@@ -76,8 +76,10 @@
       :lacinia/tag true}
     Project
     [^{:type ID
-       :lacinia/tag true}
-     id
+       :lacinia/tag true
+       :datomic/tag true
+       :datomic/unique :db.unique/identity}
+     uuid
 
      ^{:type String
        :lacinia/tag true
@@ -87,8 +89,7 @@
      ^{:type String
        :lacinia/tag true
        :datomic/tag true}
-     description
-     ]
+     description]
 
     ^{:datomic/tag-recursive true
       :lacinia/tag-recursive true
